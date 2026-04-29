@@ -28,6 +28,19 @@ class DynamicLoadBalancer(app_manager.RyuApp):
         self.algorithm = "least_connections"
         self.rr_index = 0
 
+        self.server_table = {
+            "10.0.0.5": {
+                "mac": "00:00:00:00:00:05",
+                "port": 5,
+                "connections": 0
+            },
+            "10.0.0.6": {
+                "mac": "00:00:00:00:00:06",
+                "port": 6,
+                "connections": 0
+            }
+        }
+        
         self.logger.info("DynamicLoadBalancer started")
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
@@ -38,3 +51,4 @@ class DynamicLoadBalancer(app_manager.RyuApp):
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def packet_in_handler(self, ev):
         self.logger.info("PacketIn received")
+
