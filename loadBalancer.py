@@ -25,12 +25,9 @@ class DynamicLoadBalancer(app_manager.RyuApp):
         self.virtual_ip = "10.0.0.10"
         self.virtual_mac = "00:00:00:00:00:10"
 
-        self.algorithm = "round_robin"
+        self.algorithm = "least_connections"
         self.rr_index = 0
 
-        self.monitor_thread = hub.spawn(self.monitor_loop)
-
-        self.logger.info("DynamicLoadBalancer started")
         self.logger.info("DynamicLoadBalancer started")
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
