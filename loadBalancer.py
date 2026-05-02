@@ -86,10 +86,18 @@ class DynamicLoadBalancer(app_manager.RyuApp):
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
 
         if arp_pkt:
+            self.host_table[arp_pkt.src_ip] = {
+            "mac": eth.src,
+            "port": in_port
+        }
             self.handle_arp(datapath, parser, ofproto, in_port, eth, arp_pkt)
             return
 
         if ip_pkt:
+            self.host_table[ip_pkt.src] = {
+            "mac": eth.src,
+            "port": in_port
+        }
             self.handle_ipv4(datapath, parser, ofproto, in_port, eth, ip_pkt)
             return
 
@@ -138,5 +146,26 @@ class DynamicLoadBalancer(app_manager.RyuApp):
                 src_mac=server["mac"],
                 src_ip=dst_ip
             )
+            
+    def handle_ipv4(self, datapath, parser, ofproto, in_port, eth, ip_pkt):
+        if ip_pkt.dst != self.virtual_ip:
+            return
+
+
+        client_ip = ip_pkt.src
+        server_ip = self.choose_server(client_ip)
+        server = self.server_table[server_ip]
+
+
+        self.install_load_balancing_flows(
+            datapath=datapath,
+            parser=parser,
+            ofproto=ofproto,
+            client_ip=client_ip,
+            client_port=in_port,
+            server_ip=server_ip,
+            server=server
+        )
+
 
 
