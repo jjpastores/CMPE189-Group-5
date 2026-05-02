@@ -17,8 +17,8 @@ class DynamicLoadBalancer(app_manager.RyuApp):
 
     def __init__(self, *args, **kwargs):
         super(DynamicLoadBalancer, self).__init__(*args, **kwargs)
+
         self.host_table = {}
-        self.server_table = {}
         self.client_to_server = {}
         self.datapaths = {}
 
@@ -28,13 +28,115 @@ class DynamicLoadBalancer(app_manager.RyuApp):
         self.algorithm = "least_connections"
         self.rr_index = 0
 
+        self.server_table = {
+            "10.0.0.5": {
+                "mac": "00:00:00:00:00:05",
+                "port": 5,
+                "connections": 0
+            },
+            "10.0.0.6": {
+                "mac": "00:00:00:00:00:06",
+                "port": 6,
+                "connections": 0
+            }
+        }
+
         self.logger.info("DynamicLoadBalancer started")
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
+        parser = datapath.ofproto_parser
+        ofproto = datapath.ofproto
+
+        self.datapaths[datapath.id] = datapath
+
+        match = parser.OFPMatch()
+        actions = [
+            parser.OFPActionOutput(
+                ofproto.OFPP_CONTROLLER,
+                ofproto.OFPCML_NO_BUFFER
+            )
+        ]
+
+        self.add_flow(datapath, 0, match, actions)
+
         self.logger.info("Switch connected: datapath_id=%s", datapath.id)
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def packet_in_handler(self, ev):
-        self.logger.info("PacketIn received")
+        msg = ev.msg
+        datapath = msg.datapath
+        parser = datapath.ofproto_parser
+        ofproto = datapath.ofproto
+        in_port = msg.match["in_port"]
+
+        pkt = packet.Packet(msg.data)
+        eth = pkt.get_protocol(ethernet.ethernet)
+
+        if eth is None:
+            return
+
+        if eth.ethertype == ether_types.ETH_TYPE_LLDP:
+            return
+
+        self.host_table[eth.src] = in_port
+
+        arp_pkt = pkt.get_protocol(arp.arp)
+        ip_pkt = pkt.get_protocol(ipv4.ipv4)
+
+        if arp_pkt:
+            self.handle_arp(datapath, parser, ofproto, in_port, eth, arp_pkt)
+            return
+
+        if ip_pkt:
+            self.handle_ipv4(datapath, parser, ofproto, in_port, eth, ip_pkt)
+            return
+
+    def handle_arp(self, datapath, parser, ofproto, in_port, eth, arp_pkt):
+        src_ip = arp_pkt.src_ip
+        dst_ip = arp_pkt.dst_ip
+        src_mac = eth.src
+
+        self.logger.info("ARP packet: %s asks for %s", src_ip, dst_ip)
+
+        if dst_ip == self.virtual_ip:
+            server_ip = self.choose_server(src_ip)
+            server = self.server_table[server_ip]
+
+            self.send_arp_reply(
+                datapath=datapath,
+                parser=parser,
+                ofproto=ofproto,
+                in_port=in_port,
+                dst_mac=src_mac,
+                dst_ip=src_ip,
+                src_mac=self.virtual_mac,
+                src_ip=self.virtual_ip
+            )
+
+            self.install_load_balancing_flows(
+                datapath=datapath,
+                parser=parser,
+                ofproto=ofproto,
+                client_ip=src_ip,
+                client_port=in_port,
+                server_ip=server_ip,
+                server=server
+            )
+
+        elif dst_ip in self.server_table:
+            server = self.server_table[dst_ip]
+
+            self.send_arp_reply(
+                datapath=datapath,
+                parser=parser,
+                ofproto=ofproto,
+                in_port=in_port,
+                dst_mac=src_mac,
+                dst_ip=src_ip,
+                src_mac=server["mac"],
+                src_ip=dst_ip
+            )
+
+
