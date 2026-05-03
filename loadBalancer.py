@@ -72,8 +72,7 @@ class DynamicLoadBalancer(app_manager.RyuApp):
     def choose_server(self, client_ip):
         """
         Pick a backend for this client.
-        Sticky: same client keeps the same server until client_to_server is cleared.
-        Supports round_robin or least_connections (see self.algorithm).
+        
         """
         if client_ip in self.client_to_server:
             return self.client_to_server[client_ip]
@@ -153,7 +152,8 @@ class DynamicLoadBalancer(app_manager.RyuApp):
             "mac": eth.src,
             "port": in_port
         }
-            self.handle_ipv4(datapath, parser, ofproto, in_port, eth, ip_pkt)
+            self.handle_ipv4(
+                datapath, parser, ofproto, in_port, eth, ip_pkt, msg)
             return
 
     def send_arp_reply(
@@ -198,6 +198,74 @@ class DynamicLoadBalancer(app_manager.RyuApp):
             data=p.data,
         )
         datapath.send_msg(out)
+
+    def install_load_balancing_flows(
+        self,
+        datapath,
+        parser,
+        ofproto,
+        client_ip,
+        client_port,
+        server_ip,
+        server,
+        buffer_id=None,
+    ):
+        """
+        Client->VIP packets are rewritten to the real server; return traffic
+        is rewritten so the client still sees the VIP as the source.
+        """
+        vip_int = _ipv4_to_int(self.virtual_ip)
+        client_int = _ipv4_to_int(client_ip)
+        server_int = _ipv4_to_int(server_ip)
+        server_mac_bin = haddr_to_bin(server["mac"])
+        vmac_bin = haddr_to_bin(self.virtual_mac)
+
+        match_fwd = parser.OFPMatch(
+            in_port=client_port,
+            eth_type=ether_types.ETH_TYPE_IP,
+            ipv4_src=client_int,
+            ipv4_dst=vip_int,
+        )
+        actions_fwd = [
+            parser.OFPActionSetField(eth_dst=server_mac_bin),
+            parser.OFPActionSetField(ipv4_dst=server_int),
+            parser.OFPActionOutput(port=server["port"]),
+        ]
+        self.add_flow(
+            datapath,
+            priority=20,
+            match=match_fwd,
+            actions=actions_fwd,
+            idle_timeout=60,
+        )
+
+        match_rev = parser.OFPMatch(
+            in_port=server["port"],
+            eth_type=ether_types.ETH_TYPE_IP,
+            ipv4_src=server_int,
+            ipv4_dst=client_int,
+        )
+        actions_rev = [
+            parser.OFPActionSetField(eth_src=vmac_bin),
+            parser.OFPActionSetField(ipv4_src=vip_int),
+            parser.OFPActionOutput(port=client_port),
+        ]
+        self.add_flow(
+            datapath,
+            priority=20,
+            match=match_rev,
+            actions=actions_rev,
+            idle_timeout=60,
+        )
+
+        if buffer_id is not None and buffer_id != ofproto.OFP_NO_BUFFER:
+            out = parser.OFPPacketOut(
+                datapath=datapath,
+                buffer_id=buffer_id,
+                in_port=ofproto.OFPP_CONTROLLER,
+                actions=actions_fwd,
+            )
+            datapath.send_msg(out)
 
     def handle_arp(self, datapath, parser, ofproto, in_port, eth, arp_pkt):
         src_ip = arp_pkt.src_ip
@@ -245,15 +313,13 @@ class DynamicLoadBalancer(app_manager.RyuApp):
                 src_ip=dst_ip
             )
             
-    def handle_ipv4(self, datapath, parser, ofproto, in_port, eth, ip_pkt):
+    def handle_ipv4(self, datapath, parser, ofproto, in_port, eth, ip_pkt, msg):
         if ip_pkt.dst != self.virtual_ip:
             return
-
 
         client_ip = ip_pkt.src
         server_ip = self.choose_server(client_ip)
         server = self.server_table[server_ip]
-
 
         self.install_load_balancing_flows(
             datapath=datapath,
@@ -262,7 +328,8 @@ class DynamicLoadBalancer(app_manager.RyuApp):
             client_ip=client_ip,
             client_port=in_port,
             server_ip=server_ip,
-            server=server
+            server=server,
+            buffer_id=msg.buffer_id,
         )
 
 
