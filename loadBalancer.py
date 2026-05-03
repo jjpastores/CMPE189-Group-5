@@ -156,6 +156,49 @@ class DynamicLoadBalancer(app_manager.RyuApp):
             self.handle_ipv4(datapath, parser, ofproto, in_port, eth, ip_pkt)
             return
 
+    def send_arp_reply(
+        self,
+        datapath,
+        parser,
+        ofproto,
+        in_port,
+        dst_mac,
+        dst_ip,
+        src_mac,
+        src_ip,
+    ):
+        """Send an ARP reply as PacketOut to the port the request arrived on."""
+        eth_pkt = ethernet.ethernet(
+            dst=dst_mac,
+            src=src_mac,
+            ethertype=ether_types.ETH_TYPE_ARP,
+        )
+        arp_pkt = arp.arp(
+            hwtype=1,
+            proto=ether_types.ETH_TYPE_IP,
+            hlen=6,
+            plen=4,
+            opcode=arp.ARP_REPLY,
+            src_mac=src_mac,
+            src_ip=src_ip,
+            dst_mac=dst_mac,
+            dst_ip=dst_ip,
+        )
+        p = packet.Packet()
+        p.add_protocol(eth_pkt)
+        p.add_protocol(arp_pkt)
+        p.serialize()
+
+        actions = [parser.OFPActionOutput(port=in_port)]
+        out = parser.OFPPacketOut(
+            datapath=datapath,
+            buffer_id=ofproto.OFP_NO_BUFFER,
+            in_port=ofproto.OFPP_CONTROLLER,
+            actions=actions,
+            data=p.data,
+        )
+        datapath.send_msg(out)
+
     def handle_arp(self, datapath, parser, ofproto, in_port, eth, arp_pkt):
         src_ip = arp_pkt.src_ip
         dst_ip = arp_pkt.dst_ip
