@@ -80,8 +80,6 @@ class DynamicLoadBalancer(app_manager.RyuApp):
         if eth.ethertype == ether_types.ETH_TYPE_LLDP:
             return
 
-        self.host_table[eth.src] = in_port
-
         arp_pkt = pkt.get_protocol(arp.arp)
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
 
@@ -89,7 +87,7 @@ class DynamicLoadBalancer(app_manager.RyuApp):
             self.host_table[arp_pkt.src_ip] = {
             "mac": eth.src,
             "port": in_port
-        }
+            }
             self.handle_arp(datapath, parser, ofproto, in_port, eth, arp_pkt)
             return
 
@@ -97,7 +95,7 @@ class DynamicLoadBalancer(app_manager.RyuApp):
             self.host_table[ip_pkt.src] = {
             "mac": eth.src,
             "port": in_port
-        }
+            }
             self.handle_ipv4(datapath, parser, ofproto, in_port, eth, ip_pkt)
             return
 
@@ -182,8 +180,6 @@ class DynamicLoadBalancer(app_manager.RyuApp):
     
     def choose_server():
         
-    def send_arp_reply():
-    
     def send_arp_reply():
         
     def install_load_balancing_flows():
