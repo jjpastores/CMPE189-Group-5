@@ -166,6 +166,26 @@ class DynamicLoadBalancer(app_manager.RyuApp):
             server_ip=server_ip,
             server=server
         )
+        
+    def add_flow(self, datapath, priority, match, actions):
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
 
+        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+        mod = parser.OFPFlowMod(
+            datapath=datapath,
+            priority=priority,
+            match=match,
+            instructions=inst
+        )
+        datapath.send_msg(mod)
+    
+    def choose_server():
+        
+    def send_arp_reply():
+    
+    def send_arp_reply():
+        
+    def install_load_balancing_flows():
 
 
