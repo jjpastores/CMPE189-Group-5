@@ -1,3 +1,6 @@
+import socket
+import struct
+
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER
@@ -9,8 +12,13 @@ from ryu.lib.packet import arp
 from ryu.lib.packet import ipv4
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import ether_types
-from ryu.lib.packet.packet import Packet
-from ryu.lib import hub
+from ryu.lib.mac import haddr_to_bin
+
+
+def _ipv4_to_int(ip_str):
+    """OpenFlow 1.3 matches/set-field use IPv4 as a 32-bit integer."""
+    return struct.unpack("!I", socket.inet_aton(ip_str))[0]
+
 
 class DynamicLoadBalancer(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -42,6 +50,24 @@ class DynamicLoadBalancer(app_manager.RyuApp):
         }
 
         self.logger.info("DynamicLoadBalancer started")
+
+    def add_flow(self, datapath, priority, match, actions,
+                 idle_timeout=0, hard_timeout=0, buffer_id=None):
+        """Install or update one flow on the given datapath."""
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        inst = [parser.OFPInstructionActions(
+            ofproto.OFPIT_APPLY_ACTIONS, actions)]
+        mod = parser.OFPFlowMod(
+            datapath=datapath,
+            priority=priority,
+            match=match,
+            instructions=inst,
+            idle_timeout=idle_timeout,
+            hard_timeout=hard_timeout,
+            buffer_id=buffer_id,
+        )
+        datapath.send_msg(mod)
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
