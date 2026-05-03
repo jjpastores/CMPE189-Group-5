@@ -69,6 +69,35 @@ class DynamicLoadBalancer(app_manager.RyuApp):
         )
         datapath.send_msg(mod)
 
+    def choose_server(self, client_ip):
+        """
+        Pick a backend for this client.
+        Sticky: same client keeps the same server until client_to_server is cleared.
+        Supports round_robin or least_connections (see self.algorithm).
+        """
+        if client_ip in self.client_to_server:
+            return self.client_to_server[client_ip]
+
+        keys = list(self.server_table.keys())
+        if self.algorithm == "round_robin":
+            server_ip = keys[self.rr_index % len(keys)]
+            self.rr_index += 1
+        else:
+            server_ip = min(
+                keys,
+                key=lambda k: self.server_table[k]["connections"],
+            )
+            self.server_table[server_ip]["connections"] += 1
+
+        self.client_to_server[client_ip] = server_ip
+        self.logger.info(
+            "choose_server: client %s -> %s (%s)",
+            client_ip,
+            server_ip,
+            self.algorithm,
+        )
+        return server_ip
+
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
