@@ -20,6 +20,13 @@ def _ipv4_to_int(ip_str):
     return struct.unpack("!I", socket.inet_aton(ip_str))[0]
 
 
+def _int_to_ipv4(value):
+    """Convert 32-bit int (or masked tuple from OFPMatch) to dotted string."""
+    if isinstance(value, tuple):
+        value = value[0]
+    return socket.inet_ntoa(struct.pack("!I", int(value)))
+
+
 class DynamicLoadBalancer(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
@@ -52,7 +59,7 @@ class DynamicLoadBalancer(app_manager.RyuApp):
         self.logger.info("DynamicLoadBalancer started")
 
     def add_flow(self, datapath, priority, match, actions,
-                 idle_timeout=0, hard_timeout=0, buffer_id=None):
+                 idle_timeout=0, hard_timeout=0, buffer_id=None, flags=0):
         """Install or update one flow on the given datapath."""
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
@@ -66,13 +73,15 @@ class DynamicLoadBalancer(app_manager.RyuApp):
             idle_timeout=idle_timeout,
             hard_timeout=hard_timeout,
             buffer_id=buffer_id,
+            flags=flags,
         )
         datapath.send_msg(mod)
 
     def choose_server(self, client_ip):
         """
         Pick a backend for this client.
-        
+        Sticky: returning clients reuse the same server until flows expire.
+        New clients use round_robin or least_connections (self.algorithm).
         """
         if client_ip in self.client_to_server:
             return self.client_to_server[client_ip]
@@ -141,17 +150,17 @@ class DynamicLoadBalancer(app_manager.RyuApp):
 
         if arp_pkt:
             self.host_table[arp_pkt.src_ip] = {
-            "mac": eth.src,
-            "port": in_port
-        }
+                "mac": eth.src,
+                "port": in_port,
+            }
             self.handle_arp(datapath, parser, ofproto, in_port, eth, arp_pkt)
             return
 
         if ip_pkt:
             self.host_table[ip_pkt.src] = {
-            "mac": eth.src,
-            "port": in_port
-        }
+                "mac": eth.src,
+                "port": in_port,
+            }
             self.handle_ipv4(
                 datapath, parser, ofproto, in_port, eth, ip_pkt, msg)
             return
@@ -237,6 +246,7 @@ class DynamicLoadBalancer(app_manager.RyuApp):
             match=match_fwd,
             actions=actions_fwd,
             idle_timeout=60,
+            flags=ofproto.OFPFF_SEND_FLOW_REM,
         )
 
         match_rev = parser.OFPMatch(
@@ -256,6 +266,7 @@ class DynamicLoadBalancer(app_manager.RyuApp):
             match=match_rev,
             actions=actions_rev,
             idle_timeout=60,
+            flags=ofproto.OFPFF_SEND_FLOW_REM,
         )
 
         if buffer_id is not None and buffer_id != ofproto.OFP_NO_BUFFER:
@@ -332,5 +343,49 @@ class DynamicLoadBalancer(app_manager.RyuApp):
             buffer_id=msg.buffer_id,
         )
 
+    @set_ev_cls(ofp_event.EventOFPFlowRemoved, MAIN_DISPATCHER)
+    def flow_removed_handler(self, ev):
+        """
+        When client->VIP flows idle out, drop sticky state and decrement
+        least_connections counter so load estimates stay in sync.
+        """
+        msg = ev.msg
+        ofproto = msg.datapath.ofproto
+        match = msg.match
+
+        if msg.reason not in (
+            ofproto.OFPRR_IDLE_TIMEOUT,
+            ofproto.OFPRR_HARD_TIMEOUT,
+        ):
+            return
+
+        if "ipv4_dst" not in match or "ipv4_src" not in match:
+            return
+
+        vip_int = _ipv4_to_int(self.virtual_ip)
+        try:
+            dst = match["ipv4_dst"]
+            if isinstance(dst, tuple):
+                dst = dst[0]
+            if int(dst) != vip_int:
+                return
+            client_ip = _int_to_ipv4(match["ipv4_src"])
+        except (TypeError, ValueError, struct.error):
+            return
+
+        server_ip = self.client_to_server.pop(client_ip, None)
+        if server_ip is None or server_ip not in self.server_table:
+            return
+
+        c = self.server_table[server_ip]["connections"]
+        if c > 0:
+            self.server_table[server_ip]["connections"] = c - 1
+
+        self.logger.info(
+            "flow_removed: client %s released from %s (reason=%s)",
+            client_ip,
+            server_ip,
+            msg.reason,
+        )
 
 
