@@ -106,6 +106,19 @@ class DynamicLoadBalancer(app_manager.RyuApp):
         )
         return server_ip
 
+    def set_balancing_algorithm(self, algorithm):
+        """Switch between 'round_robin' and 'least_connections'."""
+        allowed = ("round_robin", "least_connections")
+        if algorithm not in allowed:
+            self.logger.warning(
+                "set_balancing_algorithm: unknown %r (use one of %s)",
+                algorithm,
+                allowed,
+            )
+            return
+        self.algorithm = algorithm
+        self.logger.info("balancing algorithm set to %s", algorithm)
+
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
