@@ -14,22 +14,33 @@ class DynamicLoadBalancer(app_manager.RyuApp):
     VMAC = "00:00:00:00:00:10"
 
     SERVERS = {
-        "10.0.0.5": {
+        "10.0.0.7": {
             "mac": "00:00:00:00:00:05",
-            "port": 5,
-            "connections": 0
+            "port": 7,
+            "connections": 0,
+            "is_up": True
         },
-        "10.0.0.6": {
+        "10.0.0.8": {
             "mac": "00:00:00:00:00:06",
-            "port": 6,
-            "connections": 0
+            "port": 8,
+            "connections": 1,
+            "is_up": True
+        },
+        "10.0.0.9": {
+            "mac": "00:00:00:00:00:09",
+            "port": 9,
+            "connections": 2,
+            "is_up": True
         }
     }
 
     def __init__(self, *args, **kwargs):
         super(DynamicLoadBalancer, self).__init__(*args, **kwargs)
         self.flow_to_server = {}
-        self.logger.info("Dynamic Least-Connections Load Balancer Started")
+        self.logger.info("Least Connections Load Balancer")
+
+        # Uncomment this line to simulate server 10.0.0.5 being down.
+        # self.mark_server_down("10.0.0.5")
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -122,19 +133,36 @@ class DynamicLoadBalancer(app_manager.RyuApp):
 
         if flow_key in self.flow_to_server:
             server_ip = self.flow_to_server[flow_key]
+
+            if not self.SERVERS[server_ip]["is_up"]:
+                self.logger.warning(
+                    "Existing flow points to DOWN server %s. Dropping packet.",
+                    server_ip
+                )
+                return
+
         else:
             server_ip = self.choose_least_connection_server()
+
+            if server_ip is None:
+                self.logger.warning("Dropping packet: no healthy backend servers")
+                return
+
             self.flow_to_server[flow_key] = server_ip
             self.SERVERS[server_ip]["connections"] += 1
 
         server = self.SERVERS[server_ip]
 
         self.logger.info(
-            "Flow %s assigned to server %s | connections=%s",
+            "Flow %s assigned to server %s | connections=%s | health=%s",
             flow_key,
             server_ip,
             {
                 ip: self.SERVERS[ip]["connections"]
+                for ip in self.SERVERS
+            },
+            {
+                ip: self.SERVERS[ip]["is_up"]
                 for ip in self.SERVERS
             }
         )
@@ -170,10 +198,28 @@ class DynamicLoadBalancer(app_manager.RyuApp):
         datapath.send_msg(out)
 
     def choose_least_connection_server(self):
+        healthy_servers = [
+            ip for ip in self.SERVERS
+            if self.SERVERS[ip]["is_up"]
+        ]
+
+        if not healthy_servers:
+            return None
+
         return min(
-            self.SERVERS,
+            healthy_servers,
             key=lambda ip: self.SERVERS[ip]["connections"]
         )
+
+    def mark_server_down(self, server_ip):
+        if server_ip in self.SERVERS:
+            self.SERVERS[server_ip]["is_up"] = False
+            self.logger.warning("Server %s marked DOWN", server_ip)
+
+    def mark_server_up(self, server_ip):
+        if server_ip in self.SERVERS:
+            self.SERVERS[server_ip]["is_up"] = True
+            self.logger.info("Server %s marked UP", server_ip)
 
     def install_flows(
         self,
@@ -248,9 +294,9 @@ class DynamicLoadBalancer(app_manager.RyuApp):
             priority=20,
             match=match_to_server,
             actions=actions_to_server,
-            idle_timeout=30,
+            idle_timeout=0,
             hard_timeout=0,
-            send_flow_rem=True
+            send_flow_rem=False
         )
 
         self.add_flow(
@@ -258,59 +304,10 @@ class DynamicLoadBalancer(app_manager.RyuApp):
             priority=20,
             match=match_to_client,
             actions=actions_to_client,
-            idle_timeout=30,
+            idle_timeout=0,
             hard_timeout=0,
             send_flow_rem=False
         )
-
-    @set_ev_cls(ofp_event.EventOFPFlowRemoved, MAIN_DISPATCHER)
-    def flow_removed_handler(self, ev):
-        msg = ev.msg
-        match = msg.match
-
-        if "ipv4_src" not in match or "ipv4_dst" not in match:
-            return
-
-        client_ip = match["ipv4_src"]
-        vip = match["ipv4_dst"]
-
-        if vip != self.VIP:
-            return
-
-        proto = match.get("ip_proto")
-
-        if proto == 6:
-            src_port = match.get("tcp_src")
-            dst_port = match.get("tcp_dst")
-        elif proto == 17:
-            src_port = match.get("udp_src")
-            dst_port = match.get("udp_dst")
-        else:
-            return
-
-        flow_key = (
-            client_ip,
-            self.VIP,
-            proto,
-            src_port,
-            dst_port
-        )
-
-        server_ip = self.flow_to_server.pop(flow_key, None)
-
-        if server_ip and server_ip in self.SERVERS:
-            if self.SERVERS[server_ip]["connections"] > 0:
-                self.SERVERS[server_ip]["connections"] -= 1
-
-            self.logger.info(
-                "Flow expired: %s removed from %s | connections=%s",
-                flow_key,
-                server_ip,
-                {
-                    ip: self.SERVERS[ip]["connections"]
-                    for ip in self.SERVERS
-                }
-            )
 
     def send_arp_reply(
         self,
